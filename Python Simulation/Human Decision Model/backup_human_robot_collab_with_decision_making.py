@@ -3,8 +3,7 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter
 from heapq import heappush, heappop
 from scipy.linalg import solve_discrete_are
-
-
+import copy
 import math
 import csv
 import sys
@@ -20,11 +19,21 @@ import time
 import numpy as np
 
 lqr_Q = 1000*np.eye(6)
-lqr_R = 1*np.eye(9)
+lqr_R = 0.1*np.eye(9)
 dt = 0.1
 
 
 # Robot Model
+
+# dh_params = np.array([[0.72,0,0,0],
+#                           [0, 0, -0.5*pi, 0],
+#                           [0, 0, 0.5*pi, 0],
+#                           [0, 0.219,  0.5 * pi, 0],
+#                           [0, 0, -0.5 * pi, 0],
+#                           [0, 0.197, 0.5 * pi, 0],
+#                           [0, 0, -0.5 * pi,0],
+#                           [0,.1385, 0, 0]])
+
 
 dh_params = np.array([[0.72,0,0,0],
                           [0.06,0.117, -0.5*pi, 0],
@@ -35,6 +44,8 @@ dh_params = np.array([[0.72,0,0,0],
                           [0, 0, +0.5 * pi,0],
                           [0.1385+0.1665,0, 0, 0]])
 
+
+
 # Environment parameters
 grid_size = (150, 150)
 x_range = np.linspace(0, 10, grid_size[0])
@@ -42,7 +53,8 @@ y_range = np.linspace(0, 10, grid_size[1])
 X, Y = np.meshgrid(x_range, y_range, indexing='ij')
 
 # Start and end points
-A = np.array([2.8, 1.8])   # Starting point A
+# A = np.array([0.9, 0.1])   # Starting point A
+A = np.array([2.5, 1.4])   # Starting point A
 B = np.array([7, 4])       # Target point B
 
 # Obstacles (circles)
@@ -55,29 +67,33 @@ obstacles = [
 
 # Robot's positional uncertainty (covariance matrix)
 sigma = 0.1  # Standard deviation in x and y
-Sigma = np.array([[sigma**2, 0],
-                  [0, sigma**2]])  # Covariance matrix
+# Sigma = np.array([[sigma**2, 0],
+#                   [0, sigma**2]])  # Covariance matrix
 
 # Prelec function parameter gamma values
 gamma_robot = 1       # Robot's gamma
 gamma_human = 0.4     # Human's gamma
 
 # Parameters for utility function
-phi_k = 0.30       # Human preference parameter
+phi_k = 1.0      # Human preference parameter
 alpha = 0.88         # Value function parameter
 beta_prelec = 1      # Prelec function parameter (usually set to 1)
 gamma_prelec = gamma_human  # Prelec function curvature for utility calculation
-C_risk = -10        # Cost associated with collision
+C_risk = 10        # Cost associated with collision
 
 # Prelec probability weighting function for utility
+# def w(p, beta=beta_prelec, gamma=gamma_prelec):
+#     epsilon = 1e-10
+#     p = np.clip(p, epsilon, 1 - epsilon)
+#     return np.exp(-beta * (-np.log(p)) ** gamma)
+
 def w(p, beta=beta_prelec, gamma=gamma_prelec):
-    epsilon = 1e-10
-    p = np.clip(p, epsilon, 1 - epsilon)
-    return np.exp(-beta * (-np.log(p)) ** gamma)
+    return np.exp(-beta * (-np.log(p + 1e-10)) ** gamma)
+
 
 # Value function
 def v(D, alpha=alpha):
-    return D ** alpha
+    return -D ** alpha
 
 # Utility function
 def utility(phi_k, D_own, D_adapt, p_risk_own, p_risk_adapt, C_risk):
@@ -109,12 +125,8 @@ def compute_collision_probability_map(obstacle_map, sigma):
     collision_prob_map = np.clip(collision_prob_map, 0, 1)
     return collision_prob_map
 
-# Prelec weighting function for path planning
 def prelec_weight(p, gamma):
-    epsilon = 1e-10
-    p = np.clip(p, epsilon, 1 - epsilon)
-    positive_values = -np.log(p)
-    return np.exp(-positive_values ** gamma)
+    return np.exp(-(-np.log(p + 1e-10)) ** gamma)
 
 # Cost function incorporating Prelec weighting
 def compute_cost_map(collision_prob_map, gamma):
@@ -161,6 +173,38 @@ def dijkstra(cost_map, start_idx, end_idx):
     path = path[::-1]
     return path
 
+
+def compute_travelled_distance(robot_positions, utility_values):
+    """
+    Calculate the cumulative distance the robot has traveled along its preferred path
+    (the robot's own path) when the utility is negative.
+
+    Parameters:
+    - robot_positions: List of robot positions at each time step.
+    - utility_values: List or array of utility values at each time step.
+
+    Returns:
+    - distances: List of cumulative distances at each time step.
+    """
+    cumulative_distance = 0.0
+    distances = [0.0]  # Start with zero distance at the initial position
+    in_negative_utility = False
+    for i in range(1, len(utility_values)):
+        if utility_values[i] < 0:
+            if not in_negative_utility:
+                in_negative_utility = True
+                # cumulative_distance = 0.0  # Reset when utility becomes negative
+            # Compute distance between current and previous positions
+            step_distance = np.linalg.norm(robot_positions[i] - robot_positions[i - 1])
+            cumulative_distance += step_distance
+        else:
+            in_negative_utility = False
+            # cumulative_distance = 0.0  # Reset when utility becomes positive
+        distances.append(cumulative_distance)
+    return distances
+
+
+
 # Function to convert position to grid index
 def pos_to_idx(pos):
     idx_x = int(pos[0] / 10 * (grid_size[0] - 1))
@@ -179,57 +223,22 @@ def compute_remaining_distance(path_coords, current_idx):
     total_distance = np.sum(distances)
     return total_distance
 
-"""
-### Generate Trajectory
-
-
-ax = [0, 0.25, 0.5, 0.4, 0.25, 0.45, 0.65, 0.85, 0.75, 0.65, 0.75, 1.75, 2.5, 3.25, 3.5, 3.75, 4, 4.25]
-ay = [0, 0.3, 0, -0.3, 0, 0.5, 0 ,-0.5 ,0, 0.7, 0, -0.7, 0, 0.2, 0, -0.2, 0, 0.35]
-az = [0.9,0.94,0.98,1.02,1.06,1.1,1.14, 1.14, 1.12, 1.09,1.1,1.07,1.03,0.99,0.95, 0.96, 1.02,1.03]
-
-
-cx, cy, cyaw, ck, s = cubic_spline_planner.calc_spline_course(
-    ax, ay, ds=0.1)
-cx5, cz, cyaw5, ck5, s = cubic_spline_planner.calc_spline_course(
-    ax, az, ds=0.1)
-
-cx1 = np.linspace(0,1,len(cx))
-cx2 = np.linspace(0,1,509)
-f = interp1d(cx1,cx)
-cx = f(cx2)
-
-cy1 = np.linspace(0,1,len(cy))
-cy2 = np.linspace(0,1,509)
-f = interp1d(cy1,cy)
-cy = f(cy2)
-
-cyaw1 = np.linspace(0,1,len(cyaw))
-cyaw2 = np.linspace(0,1,509)
-f = interp1d(cyaw1,cyaw)
-cyaw = f(cyaw2)
-
-# cyaw = np.zeros(300)
-
-cz1 = np.linspace(0,1,len(cz))
-cz2 = np.linspace(0,1,509)
-f = interp1d(cz1,cz)
-cz = f(cz2)
-cpitch = np.zeros(len(cx))
-croll = np.zeros(len(cx))
-world_ref_traj_without_noise = np.array([cx, cy, cz, cyaw, cpitch, croll])
-
-
-
-"""
-
-
-
-"""
+# """
 
 
 class State:
 
-    def __init__(self,world_ref_traj ):   
+    def __init__(self,world_ref_traj):   
+
+        # dh_params = np.array([[0.72,0,0,0],
+        #                   [0, 0, -0.5*pi, 0],
+        #                   [0, 0, 0.5*pi, 0],
+        #                   [0, 0.219,  0.5 * pi, 0],
+        #                   [0, 0, -0.5 * pi, 0],
+        #                   [0, 0.197, 0.5 * pi, 0],
+        #                   [0, 0, -0.5 * pi,0],
+        #                   [0,.1385, 0, 0]])
+
 
         dh_params = np.array([[0.72,0,0,0],
                           [0.06,0.117, -0.5*pi, 0],
@@ -240,23 +249,36 @@ class State:
                           [0, 0, +0.5 * pi,0],
                           [0.1385+0.1665,0, 0, 0]])
         
+
     
-        self.x_base = 2.4
-        self.y_base = 1.8
+        self.x_base = 2.5
+        self.y_base = 1.9
+        # self.x_base = 0.1
+        # self.y_base = 0.6
         self.yaw_base = 0
-        xyz = np.array([[desired_position[0]-self.x_base], [desired_position[1]-self.y_base], [world_ref_traj[2,0]]])
-        abc= np.array([world_ref_traj[3,0], world_ref_traj[4,0], world_ref_traj[5,0]])
+        xyz = np.array([[desired_position[0]-self.x_base], [desired_position[1]-self.y_base], [world_ref_traj[0,2]]])
+        abc= np.array([world_ref_traj[0, 3], world_ref_traj[0, 4], world_ref_traj[0, 5]])
+
+     
+
+
         robot = RobotSerial(dh_params)
         end = Frame.from_euler_3(abc, xyz)
         robot.inverse(end)
         self.theta = robot.axis_values.copy()
+
+
         self.yaw_base = self.theta[0]
        
      
         robot = RobotSerial(dh_params)
         f = robot.forward(self.theta)
+
+        # print(f)
+
+        x_world = self.x_base + f.t_3_1.reshape([3, ])[0]
         
-        self.x_world = self.x_base + f.t_3_1.reshape([3, ])[0]
+        self.x_world = x_world
         # self.x_world = self.x_base + f.t_3_1.reshape([3, ])[0]*math.cos(self.yaw_base) - f.t_3_1.reshape([3, ])[1]*math.sin(self.yaw_base)
         self.y_world = self.y_base +f.t_3_1.reshape([3, ])[1]
         # self.y_world = self.y_base + f.t_3_1.reshape([3, ])[0]*math.sin(self.yaw_base) + f.t_3_1.reshape([3, ])[1]*math.cos(self.yaw_base)
@@ -264,6 +286,7 @@ class State:
         self.yaw_world = f.euler_3[2]
         self.pitch_world = f.euler_3[1]
         self.roll_world = f.euler_3[0]
+        
 
 
         self.x_body = f.t_3_1.reshape([3, ])[0]
@@ -278,16 +301,20 @@ class State:
 def lqr_speed_steering_control(state, lqr_Q, lqr_R, world_ref_traj, n_sum, dh_params, i, std_dev, world_ref_traj_without_noise_test, D, joint_angle_combination, sigma):
     
     A = np.eye(6)
+
     B, f =  get_B(dh_params, state, joint_angle_combination)
+
+
+
     ustar, P, p, c, state_error_world, c_t, rt_c, rt_p, M, P_t, p_t = dlqr(A, B, lqr_Q, lqr_R, world_ref_traj, n_sum, i, state, std_dev, world_ref_traj_without_noise_test, D, sigma)
-    ustar_cost = ustar.T @ lqr_R @ ustar
-    error_cost = state_error_world.T @ lqr_Q @ state_error_world
+    # ustar, P, p, c, state_error_world, c_t, rt_c, rt_p, M, P_t, p_t = dlqr(A, B, lqr_Q, lqr_R, world_ref_traj, n_sum, i, state, std_dev, world_ref_traj_without_noise_test, D, sigma)
 
-
-    return ustar, B, f, P, p, c, state_error_world, c_t, rt_c, rt_p, M, P_t, p_t, ustar_cost, error_cost
+    return ustar, f
+    # return ustar, B, f, P, p, c, state_error_world, c_t, rt_c, rt_p, M, P_t, p_t, ustar_cost, error_cost
 
 
 def get_B (dh_params, state, joint_angle_combination):
+
     robot = RobotSerial(dh_params)
     theta = joint_angle_combination
     f = robot.forward(theta)
@@ -298,22 +325,40 @@ def get_B (dh_params, state, joint_angle_combination):
         for row in csvreader:
             jacobian.append([cell for cell in row])
     jacobian = np.array(jacobian, dtype= float) 
+
+    # print(jacobian)
     
     B = np.zeros((6,9))
     B[:, 1:9] = jacobian * dt
 
     B[0,0] = dt * math.cos(state.yaw_base)
     B[1,0] = dt * math.sin(state.yaw_base)
+
     
     return B, f
 
 
-def dlqr(A, B, Q, R, world_ref_traj, n_sum, i, std_dev, state, world_ref_traj_without_noise, D, sigma):
+def dlqr(A, B, Q, R, world_ref_traj, n_sum, i, state, std_dev,  world_ref_traj_without_noise, D, sigma):
+
     P, p, c, rt_c, rt_p, c_t, P_t, p_t = solve_dare(A, B, Q, R, world_ref_traj, n_sum, i, std_dev, state, world_ref_traj_without_noise, D, sigma)
+    # In your main script or before calling lqr_speed_steering_control
+    
+    # In your lqr_speed_steering_control function, before calling dlqr
     M = la.inv(R + (B.T @ P @ B)) @ B.T
-    state_error_world = np.array([state.x_world, state.y_world, state.z_world, state.yaw_world, state.pitch_world, state.roll_world]).reshape(-1,1) - (world_ref_traj[:,i+1].reshape(-1,1) )
+    # print("==========")
+    # print(np.array([state.x_world, state.y_world, state.z_world, state.yaw_world, state.pitch_world, state.roll_world]).reshape(-1,1))
+    # print(world_ref_traj[i].reshape(-1,1))
+    # print("==========")
+
+
+    state_error_world = np.array([state.x_world, state.y_world, state.z_world, state.yaw_world, state.pitch_world, state.roll_world]).reshape(-1,1) - world_ref_traj[i].reshape(-1,1) 
+    # state_error_world = np.array([state.x_world, state.y_world, state.z_world, state.yaw_world, state.pitch_world, state.roll_world]).reshape(-1,1) - (world_ref_traj[:,i+1].reshape(-1,1) )
 
     ustar = - M @ (P @ (state_error_world + (rt_c.reshape(-1,1) -  rt_p.reshape(-1,1))) + p )
+
+    # print("==========")
+    # print(ustar)
+    # print("==========")
     ustar[1] = ustar[1] % (2 * math.pi)
     if ustar[1] > math.pi:
         ustar[1] -= 2 * math.pi
@@ -340,37 +385,71 @@ def solve_dare(A, B, Q, R, world_ref_traj, n_sum,i, std_dev, state, world_ref_tr
     trace_noise_expectation = np.trace(noise_expectation)
         
     for j in range(horizon-1,-1,-1): 
-        
+
         M = la.inv(R + (B.T @ P_next @ B)) @ B.T
         P_plus = P_next.copy()
         P_next = P_next - P_next @ B @ M @ P_next + Q
 
-        
+        # print(world_ref_traj_without_noise[i+j][2])
 
-        world_xyz_in_horizon_1 =([world_ref_traj_without_noise[:,i+j+1][0]], 
-                                 [world_ref_traj_without_noise[:,i+j+1][1]], 
-                                 [world_ref_traj_without_noise[:,i+j+1][2]] )  
 
-        world_xyz_in_horizon_2 = ([world_ref_traj_without_noise[:,i+j+2][0]],
-                                  [world_ref_traj_without_noise[:,i+j+2][1]],
-                                  [world_ref_traj_without_noise[:,i+j+2][2]] ) 
+        '''
+             
+
+        world_xyz_in_horizon_1 =([world_ref_traj_without_noise[i][0]], 
+                                 [world_ref_traj_without_noise[i][1]], 
+                                 [world_ref_traj_without_noise[i][2]] )  
+
+        world_xyz_in_horizon_2 = ([world_ref_traj_without_noise[i+j][0]],
+                                  [world_ref_traj_without_noise[i+j][1]],
+                                  [world_ref_traj_without_noise[i+j][2]] ) 
         
         world_xyz_in_horizon_1_orientation = np.array([
-            [world_ref_traj_without_noise[:,i+j+1][3]],
-            [world_ref_traj_without_noise[:,i+j+1][4]],
-            [world_ref_traj_without_noise[:,i+j+1][5]]
+            [world_ref_traj_without_noise[i][3]],
+            [world_ref_traj_without_noise[i][4]],
+            [world_ref_traj_without_noise[i][5]]
         ])
 
         world_xyz_in_horizon_1 = np.vstack((world_xyz_in_horizon_1, world_xyz_in_horizon_1_orientation))
         
         
         world_xyz_in_horizon_2_orientation = np.array([
-            [world_ref_traj_without_noise[:,i+j+2][3]],
-            [world_ref_traj_without_noise[:,i+j+2][4]],
-            [world_ref_traj_without_noise[:,i+j+2][5]]
+            [world_ref_traj_without_noise[i+j][3]],
+            [world_ref_traj_without_noise[i+j][4]],
+            [world_ref_traj_without_noise[i+j][5]]
         ])
 
         world_xyz_in_horizon_2 = np.vstack((world_xyz_in_horizon_2, world_xyz_in_horizon_2_orientation))
+
+        '''
+        #BETTER
+
+        world_xyz_in_horizon_1 =([world_ref_traj_without_noise[i+j][0]], 
+                                 [world_ref_traj_without_noise[i+j][1]], 
+                                 [world_ref_traj_without_noise[i+j][2]] )  
+
+        world_xyz_in_horizon_2 = ([world_ref_traj_without_noise[i+j+1][0]],
+                                  [world_ref_traj_without_noise[i+j+1][1]],
+                                  [world_ref_traj_without_noise[i+j+1][2]] ) 
+        
+        world_xyz_in_horizon_1_orientation = np.array([
+            [world_ref_traj_without_noise[i+j][3]],
+            [world_ref_traj_without_noise[i+j][4]],
+            [world_ref_traj_without_noise[i+j][5]]
+        ])
+
+        world_xyz_in_horizon_1 = np.vstack((world_xyz_in_horizon_1, world_xyz_in_horizon_1_orientation))
+        
+        
+        world_xyz_in_horizon_2_orientation = np.array([
+            [world_ref_traj_without_noise[i+j+1][3]],
+            [world_ref_traj_without_noise[i+j+1][4]],
+            [world_ref_traj_without_noise[i+j+1][5]]
+        ])
+
+        world_xyz_in_horizon_2 = np.vstack((world_xyz_in_horizon_2, world_xyz_in_horizon_2_orientation))
+
+
         
         p_plus = p_next.copy()
         p_next = p_next  + P_next @ (world_xyz_in_horizon_1 - world_xyz_in_horizon_2) 
@@ -435,7 +514,7 @@ def update(state, ustar, f, dh_params, B, joint_angle_combination):
     
     return state, ee_pose
 
-"""
+# """
 
 # Main code
 # Precompute obstacle map and collision probability map
@@ -459,12 +538,25 @@ steps_to_save = [10, 30, 40, 50]  # Steps to save images
 
 utility_values = []  # Collect utility values during simulation
 
+D_adapt_values = []
+phi_k_values = []
+
+
 # Simulation loop
 while np.linalg.norm(robot_position - B) > 0.1 and step < max_steps:
     cnt += 1
+    print(cnt)
+    
+
     # Update start index to robot's current position
     start_idx = pos_to_idx(robot_position)
     end_idx = pos_to_idx(B)
+
+
+
+
+
+
 
     # Compute paths starting from current robot position
     path_robot = dijkstra(cost_map_robot, start_idx, end_idx)
@@ -477,19 +569,49 @@ while np.linalg.norm(robot_position - B) > 0.1 and step < max_steps:
     next_pos_robot = path_coords_robot[1] if len(path_coords_robot) > 1 else path_coords_robot[0]
     next_pos_human = path_coords_human[1] if len(path_coords_human) > 1 else path_coords_human[0]
 
-    # Current positions
+    #Current positions
+
     current_pos_robot = path_coords_robot[0]
     current_pos_human = path_coords_human[0]
 
     # Decision-making logic
     D_own = compute_remaining_distance(path_coords_robot, 0)
     D_adapt = compute_remaining_distance(path_coords_human, 0)
+    D_adapt_values.append(D_adapt)
+    # print(D_adapt_values)
+
+    travelled_distances = compute_travelled_distance(robot_positions, utility_values)
+    # travelled_distances = compute_travelled_distance(D_adapt_values, utility_values)
+    print("---------------------")
+    # print(travelled_distances[-1])
+    # print("---------------------")
+
+    phi_k = phi_k * np.exp(-(travelled_distances[-1]/100))
+
+
+    # print('human behavior:', phi_k)
+
+
+    phi_k_values.append(phi_k)
+
+
+
+    # D_travelled_human = compute_travelled_distance(path)
+
     idx_next_robot = pos_to_idx(next_pos_robot)
     idx_next_human = pos_to_idx(next_pos_human)
     p_risk_own = collision_prob_map[idx_next_robot]
+    # print("=====================")
+    # print("True risk", p_risk_own)
+    # print("=====================")
     p_risk_adapt = collision_prob_map[idx_next_human]
     decision_value = utility(phi_k, D_own, D_adapt, p_risk_own, p_risk_adapt, C_risk)
     utility_values.append(decision_value)
+    # print('decision value:', decision_value)
+
+    # print("---------------------")
+
+
 
     if cnt > 2:
         if (robot_positions[-1] == robot_positions[-2]).all():
@@ -498,6 +620,93 @@ while np.linalg.norm(robot_position - B) > 0.1 and step < max_steps:
 
     desired_position = next_pos_human if decision_value >= 0 else next_pos_robot
     world_ref_traj_without_noise_test = path_coords_human if decision_value >= 0 else path_coords_robot
+    print(world_ref_traj_without_noise_test.shape)
+
+
+
+
+    # Initial number of points
+    num_points = len(world_ref_traj_without_noise_test)
+
+    # Container for storing the reduced trajectories
+    large_trajectories = []
+
+
+    # Separate x and y coordinates
+    cx, cy = world_ref_traj_without_noise_test[:, 0], world_ref_traj_without_noise_test[:, 1]
+    
+    # Create interpolation functions
+    cx1 = np.linspace(0, 1, len(cx))
+    cy1 = np.linspace(0, 1, len(cy))
+    f_cx = interp1d(cx1, cx, kind='linear')
+    f_cy = interp1d(cy1, cy, kind='linear')
+    
+    # Define the new number of points and the new linspace
+    new_linspace = np.linspace(0, 1, num_points - 1)
+    
+    # Interpolate to reduce points
+    new_cx = f_cx(new_linspace)
+    new_cy = f_cy(new_linspace)
+    
+    # Combine the new trajectory
+    new_traj = np.column_stack((new_cx, new_cy))
+    large_trajectories.append(new_traj)
+    
+    # Update trajectory and point count for the next step
+    world_ref_traj_without_noise_test = new_traj
+    print(world_ref_traj_without_noise_test.shape)
+
+
+
+
+
+
+
+    # print(world_ref_traj_without_noise_test)
+    # Define the values you want to embed
+    values_to_embed = np.array([0.8, 0.0, 0, 0])
+
+    # Create a new array by repeating `values_to_embed` for each row
+    # The number of rows is the same as in the original array
+    embedding = np.tile(values_to_embed, (world_ref_traj_without_noise_test.shape[0], 1))
+
+    # Concatenate the embedding to the original array along the columns (axis=1)
+    world_ref_traj_without_noise_test = np.hstack((world_ref_traj_without_noise_test, embedding))
+
+    # def lqr_speed_steering_control(state, lqr_Q, lqr_R, world_ref_traj, n_sum, dh_params, i, std_dev, world_ref_traj_without_noise_test, D, joint_angle_combination, sigma):
+
+    world_ref_traj = world_ref_traj_without_noise_test
+    n_sum = 0
+    std_dev = 0
+    # D = 0
+    sigma = np.array([[0.015*std_dev, 0, 0], 
+        [0, 0.025*std_dev, 0],
+        [0, 0, 0.015*std_dev]])
+    D = np.array([[0, 0, 0], 
+        [0, 0, 0],
+        [0, 0, 0],
+        [0,0,0],
+        [0,0,0],
+        [0,0,0]])
+    if step == 0:
+        state = State(world_ref_traj=world_ref_traj)
+        theta = state.theta
+        joint_angle_combination = theta
+
+
+
+    # for i in range(len(path_coords_human)+1):
+    i = 0
+        
+
+    ustar, f = lqr_speed_steering_control(state, lqr_Q, lqr_R, world_ref_traj, n_sum, dh_params, i, std_dev, world_ref_traj_without_noise_test, D, joint_angle_combination, sigma)
+    state, ee_pose = update(state, ustar, f, dh_params, B,joint_angle_combination)    
+
+
+    robot_position[0] = ee_pose[0]
+    robot_position[1] = ee_pose[1]
+    num_points -= 1
+
 
     ### Algorithm: Update robot's state using LQR control ###
 
@@ -511,12 +720,6 @@ while np.linalg.norm(robot_position - B) > 0.1 and step < max_steps:
 
 
     robot_positions.append(robot_position.copy())
-
-
-    print("---------------------")
-    print(cnt)
-    print(decision_value)
-    print("---------------------")
 
     # Clear previous paths and replot updated paths
     ax.clear()
@@ -532,9 +735,9 @@ while np.linalg.norm(robot_position - B) > 0.1 and step < max_steps:
     ax.legend()
     ax.grid(True)
 
-    # Save plot for specific steps
-    if step in steps_to_save:
-        plt.savefig(f"robot_navigation_step_{step}.png")  # Save the image
+    # # Save plot for specific steps
+    # if step in steps_to_save:
+    #     plt.savefig(f"robot_navigation_step_{step}.png")  # Save the image
 
     # Display the updated plot
     plt.pause(0.1)  # Small pause to update the plot
@@ -579,7 +782,7 @@ plt.title('Utility Value Over Decision Steps')
 plt.axhline(0, color='black', linestyle='--')
 plt.grid(True)
 plt.legend()
-# Save the plot
-plt.savefig("utility_value_plot.png")
+# # Save the plot
+# plt.savefig("utility_value_plot.png")
 
 plt.show()

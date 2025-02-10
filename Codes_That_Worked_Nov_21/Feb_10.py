@@ -1,3 +1,7 @@
+
+
+
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
@@ -38,7 +42,6 @@ obstacles = [
     # {'center': np.array([8, 5]),   'radius': 0.55},
     # {'center': np.array([3, 3]), 'radius': 0.5},
 
-
     # {'center': np.array([3, 0.5]), 'radius': 0.45},
     {'center': np.array([5, 3]),   'radius': 0.2},
     {'center': np.array([5, 5.5]), 'radius': 0.2},
@@ -78,7 +81,7 @@ def grid_to_world(idx_pos):
     y = y_range[j]
     return np.array([x, y])
 
-# --- A* Algorithm (4-connected) ---
+# --- A* Algorithm (8-connected) ---
 class Node:
     def __init__(self, position, parent=None, g=0, h=0):
         self.position = position  # grid cell (i,j)
@@ -402,8 +405,8 @@ def main():
     state = None  # will be initialized on the first control step
     current_team_index = None  
     phi_init = 0.1
-    phi_dec = phi_init
-    cnt = 0
+    phi_dec = phi_init  # initial value
+    # Removed dummy counter 'cnt'
     ind_1 = 0
     ind_2 = 0
     ind_3 = 0
@@ -411,8 +414,11 @@ def main():
     ind_5 = 0
     ind_6 = 0
     ind_7 = 0
-    
 
+    # Initialize last_team_change_position to current position
+    last_team_change_position = current_position.copy()
+    traveled_distance = 0
+    cnt = 0
     
     while np.linalg.norm(current_position - target_position) > 0.3 and step < max_steps:
         
@@ -488,13 +494,13 @@ def main():
             utilities_stack = np.array(utilities_linearized)
             min_indices = np.argmin(utilities_stack, axis=0)
             human_preferred = np.argmin(final_nominal_utils, axis=0)
-            print(human_preferred)
+            print("Human preferred index:", human_preferred)
             robot_preferred = np.argmin(final_true_utils, axis = 0)
-            print(robot_preferred)
+            print("Robot preferred index:", robot_preferred)
             total_points = min_indices.size
             counts = np.bincount(min_indices.flatten(), minlength=len(utilities_linearized))
             percentages = counts / total_points * 100
-            print(percentages)
+            print("Percentages:", percentages)
 
             # -------------------------------
             # Final decision cost function.
@@ -513,64 +519,47 @@ def main():
                     + phi_dec * (base_nominal - final_nominal_utils[k])
                 )
             optimal_index = np.argmin(costs)
-            print(current_team_index)
-            print(optimal_index)
+            print("Current team index:", current_team_index)
+            print("Optimal candidate index:", optimal_index)
 
             if optimal_index == 0:
                 ind_1 += 1
                 print("ind_1: ", ind_1)
-
             if optimal_index == 1:
                 ind_2 += 1
                 print("ind_2: ", ind_2)
-
             if optimal_index == 2:
                 ind_3 += 1
                 print("ind_3: ", ind_3)
-
             if optimal_index == 3:
                 ind_4 += 1
                 print("ind_4: ", ind_4)
-
             if optimal_index == 4:
                 ind_5 += 1
                 print("ind_5: ", ind_5)
-
             if optimal_index == 5:
                 ind_6 += 1
                 print("ind_6: ", ind_6)
-
             if optimal_index == 6:
                 ind_7 += 1
                 print("ind_7: ", ind_7)
 
+            # -------------------------------
+            # Modified phi_dec update: Use the actual traveled distance since the last team index change.
+            # -------------------------------
             if current_team_index != optimal_index:
-                phi_dec = phi_init * np.exp( (cnt*0.4 / 10))
                 cnt += 1
-                print("cnt: ",cnt)
-                print("phi_dec:", phi_dec)
+                print("cnt: ", cnt)
+                traveled_distance += np.linalg.norm(current_position - last_team_change_position)
+                phi_dec = phi_init * np.exp(traveled_distance / 1)
+                print("Traveled distance since last team change: ", traveled_distance)
+                print("Updated phi_dec:", phi_dec)
+                last_team_change_position = current_position.copy()
             # Update the team's current opening index for subsequent iterations.
             current_team_index = optimal_index
 
-
-
             best_candidate = paths_via_openings[optimal_index]
             best_path_world = best_candidate['path_world']
-
-            
-            # # Final decision cost function.
-            # phi_dec = 1.0
-            # N = len(paths_via_openings)
-            # costs = np.zeros(N)
-            # for i in range(N):
-            #     cost = 0
-            #     for k in range(N):
-            #         cost += percentages[k] * ( - (1 - phi_dec) * (final_true_utils[i] - final_true_utils[k]) +
-            #                                    phi_dec * (final_nominal_utils[i] - final_nominal_utils[k]) )
-            #     costs[i] = cost
-            # optimal_index = np.argmin(costs)
-            # best_candidate = paths_via_openings[optimal_index]
-            # best_path_world = best_candidate['path_world']
             
             # Store the midpoint of this chosen opening
             chosen_opening_midpoint = best_candidate['opening_point']
@@ -694,13 +683,13 @@ def main():
     
     print("Simulation complete. Total steps:", step)
     
-    print("Number of times they chose Opening 1: ",ind_1)
-    print("Number of times they chose Opening 2: ",ind_2)
-    print("Number of times they chose Opening 3: ",ind_3)
-    print("Number of times they chose Opening 4: ",ind_4)
-    print("Number of times they chose Opening 5: ",ind_5)
-    print("Number of times they chose Opening 6: ",ind_6)
-    print("Number of times they chose Opening 7: ",ind_7)
+    print("Number of times they chose Opening 1: ", ind_1)
+    print("Number of times they chose Opening 2: ", ind_2)
+    print("Number of times they chose Opening 3: ", ind_3)
+    print("Number of times they chose Opening 4: ", ind_4)
+    print("Number of times they chose Opening 5: ", ind_5)
+    print("Number of times they chose Opening 6: ", ind_6)
+    print("Number of times they chose Opening 7: ", ind_7)
     # -------------------------------
     # FINAL PLOTS AFTER SIMULATION
     # -------------------------------
@@ -779,5 +768,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
-
